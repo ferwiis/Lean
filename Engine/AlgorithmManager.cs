@@ -197,6 +197,10 @@ namespace QuantConnect.Lean.Engine
                     results.SystemDebugMessage(logMessage);
                     break;
                 }
+                else
+                {
+                    Console.WriteLine($"[[LEAN ENGINE]] TIME: {time} - DATA POINTS: {DataPoints} - PORTFOLIO VALUE: {algorithm.Portfolio.TotalPortfolioValue}");
+                }
 
                 // If backtesting/warmup, we need to check if there are realtime events in the past
                 // which didn't fire because at the scheduled times there was no data (i.e. markets closed)

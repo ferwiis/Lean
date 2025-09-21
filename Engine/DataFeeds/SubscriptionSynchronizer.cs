@@ -237,6 +237,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds
 
                     changes += newChanges;
                 }
+
                 while (newChanges != SecurityChanges.None
                     || _universeSelection.AddPendingInternalDataFeeds(frontierUtc));
 
