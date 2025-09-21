@@ -36,7 +36,8 @@ namespace QuantConnect.Data
         {
             brokerageName = null;
             if (historyProviderName != "QuantConnect.Lean.Engine.HistoricalData.BrokerageHistoryProvider"
-                && historyProviderName != "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider")
+                && historyProviderName != "QuantConnect.Lean.Engine.HistoricalData.SubscriptionDataReaderHistoryProvider"
+                && historyProviderName != "QuantConnect.Lean.Engine.HistoricalData.BinaryHistoryProvider")
             {
                 var matches = _brokerageHistoryProvider.Match(historyProviderName);
                 if (matches.Success)

@@ -38,6 +38,10 @@ namespace QuantConnect.Optimizer.Launcher
                 Config.MergeCommandLineArgumentsWithConfiguration(OptimizerArgumentParser.ParseArguments(args));
             }
 
+            var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            var configPath = Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "config.json"));
+            Config.SetConfigurationFile(configPath);
+
             using var endedEvent = new ManualResetEvent(false);
 
             try
