@@ -101,10 +101,22 @@ namespace QuantConnect.Lean.Engine.DataFeeds
         private IEnumerator<BaseData> CreateDataEnumerator(SubscriptionRequest request, Resolution? fillForwardResolution, LastPointTracker lastPointTracker, bool isWarmUp)
         {
             // ReSharper disable once PossibleMultipleEnumeration
-            var enumerator = _subscriptionFactory.CreateEnumerator(request, _dataProvider);
+            var enumerator = CreateUnderlyingDataEnumerator(request);
             enumerator = ConfigureEnumerator(request, false, enumerator, fillForwardResolution, lastPointTracker, isWarmUp);
 
             return enumerator;
+        }
+
+        /// <summary>
+        /// Creates the raw market-data enumerator before fill-forward, filtering, and warmup tracking are applied.
+        /// </summary>
+        /// <remarks>
+        /// Derived historical feeds can replace only their storage reader while retaining the complete LEAN subscription lifecycle.
+        /// Universe requests do not use this method.
+        /// </remarks>
+        protected virtual IEnumerator<BaseData> CreateUnderlyingDataEnumerator(SubscriptionRequest request)
+        {
+            return _subscriptionFactory.CreateEnumerator(request, _dataProvider);
         }
 
         /// <summary>
