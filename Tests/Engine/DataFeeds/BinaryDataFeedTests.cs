@@ -19,6 +19,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using NUnit.Framework;
 using QuantConnect.Configuration;
 using QuantConnect.Data;
@@ -27,22 +28,72 @@ using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Tests.Common.Securities;
 using QuantConnect.Lean.Engine;
 using QuantConnect.Lean.Engine.DataFeeds;
+using QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories;
 using QuantConnect.Lean.Engine.Results;
 using QuantConnect.Packets;
 
 namespace QuantConnect.Tests.Engine.DataFeeds
 {
     [TestFixture, NonParallelizable]
-    public class BinaryDataFeedTests : BinaryBatchTestBase
+    public class BinaryDataFeedTests
     {
+        private string _dataPath;
+        private static readonly DateTime First = new DateTime(2024, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        private static readonly Symbol TestSymbol = Symbol.Create("EURUSD", SecurityType.Forex, Market.FXCM);
+
+        [SetUp]
+        public void SetUp()
+        {
+            _dataPath = Path.Combine(Path.GetTempPath(), "lean-binary-feed-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(_dataPath);
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            if (Directory.Exists(_dataPath)) Directory.Delete(_dataPath, true);
+        }
+
+        private void WriteSelectedBarFile(bool quote, params (DateTime Time, float Open)[] records)
+        {
+            var directory = Path.Combine(_dataPath, "FX_EURUSD_test_bin_data");
+            Directory.CreateDirectory(directory);
+            var suffix = "";
+            var file = Path.Combine(directory, $"1-FX_EURUSD_1M_20240701-20240702{suffix}.bin");
+            using var writer = new BinaryWriter(File.Create(file));
+            foreach (var record in records)
+            {
+                writer.Write((double)new DateTimeOffset(record.Time).ToUnixTimeSeconds());
+                writer.Write(record.Open);
+                writer.Write(record.Open + 2);
+                writer.Write(record.Open - 1);
+                writer.Write(record.Open + 1);
+                writer.Write(1f);
+                if (quote)
+                {
+                    for (var side = 0; side < 2; side++)
+                    {
+                        var offset = side == 0 ? -1 : 1;
+                        writer.Write(record.Open + offset);
+                        writer.Write(record.Open + 2 + offset);
+                        writer.Write(record.Open - 1 + offset);
+                        writer.Write(record.Open + 1 + offset);
+                    }
+                    writer.Write(2f);
+                }
+                else writer.Write(0);
+            }
+            Assert.AreEqual(records.Length * (quote ? 64 : 32), writer.BaseStream.Length);
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void DataFeedReadsSelectedBarType(bool quote)
         {
-            WriteFile(quote, 1, "1M", (First, 10), (First.AddMinutes(1), 11), (First.AddMinutes(2), 12));
+            WriteSelectedBarFile(quote, (First, 10), (First.AddMinutes(1), 11), (First.AddMinutes(2), 12));
             var previousBarType = Config.Get("bar-type");
             var previousTimeframe = Config.Get("timeframe");
-            var feed = new TestBinaryDataFeed();
+            var feed = new TestBinaryDataFeed(new BinarySubscriptionEnumeratorFactory(_dataPath));
             var algorithm = new AlgorithmStub(feed);
             using var synchronizer = new Synchronizer();
             synchronizer.Initialize(algorithm, algorithm.DataManager, new());
@@ -78,7 +129,8 @@ namespace QuantConnect.Tests.Engine.DataFeeds
 
         private sealed class TestBinaryDataFeed : BinaryDataFeed
         {
-            public IEnumerator<BaseData> CreateBinarySource(SubscriptionRequest request) => CreateEnumerator(request);
+            public TestBinaryDataFeed(BinarySubscriptionEnumeratorFactory factory) : base(factory) { }
+            public IEnumerator<BaseData> CreateBinarySource(SubscriptionRequest request) => CreateUnderlyingDataEnumerator(request);
         }
     }
 }
