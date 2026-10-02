@@ -14,9 +14,6 @@
  *
 */
 
-using System;
-using System.Collections.Generic;
-using NodaTime;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Data.UniverseSelection;
@@ -116,22 +113,8 @@ namespace QuantConnect.Lean.Engine.HistoricalData
                 _nullCache
             );
 
-            var dataReader = new SubscriptionDataReader(config,
-                request,
-                _mapFileProvider,
-                _factorFileProvider,
-                _dataCacheProvider,
-                _dataProvider,
-                _objectStore);
-
-            dataReader.InvalidConfigurationDetected += (sender, args) => { OnInvalidConfigurationDetected(args); };
-            dataReader.NumericalPrecisionLimited += (sender, args) => { OnNumericalPrecisionLimited(args); };
-            dataReader.StartDateLimited += (sender, args) => { OnStartDateLimited(args); };
-            dataReader.DownloadFailed += (sender, args) => { OnDownloadFailed(args); };
-            dataReader.ReaderErrorDetected += (sender, args) => { OnReaderErrorDetected(args); };
-
-            IEnumerator<BaseData> reader = dataReader;
-            var intraday = GetIntradayDataEnumerator(dataReader, request);
+            var reader = CreateDataReader(config, request, out var dataReader);
+            var intraday = GetIntradayDataEnumerator(reader, request);
             if (intraday != null)
             {
                 // we optionally concatenate the intraday data enumerator
@@ -188,6 +171,37 @@ namespace QuantConnect.Lean.Engine.HistoricalData
                 return SubscriptionUtils.CreateAndScheduleWorker(subscriptionRequest, reader, _factorFileProvider, false, AlgorithmSettings.DailyPreciseEndTime);
             }
             return SubscriptionUtils.Create(subscriptionRequest, reader, AlgorithmSettings.DailyPreciseEndTime);
+        }
+
+        /// <summary>
+        /// Creates the raw historical data reader before the standard strict-end-time, corporate-event,
+        /// fill-forward, and filter wrappers are applied.
+        /// </summary>
+        /// <param name="config">The subscription configuration.</param>
+        /// <param name="request">The history request.</param>
+        /// <param name="subscriptionDataReader">
+        /// The native reader used by corporate-event processing, or null for a non-native storage source.
+        /// </param>
+        protected virtual IEnumerator<BaseData> CreateDataReader(
+            SubscriptionDataConfig config,
+            HistoryRequest request,
+            out SubscriptionDataReader subscriptionDataReader)
+        {
+            subscriptionDataReader = new SubscriptionDataReader(config,
+                request,
+                _mapFileProvider,
+                _factorFileProvider,
+                _dataCacheProvider,
+                _dataProvider,
+                _objectStore);
+
+            subscriptionDataReader.InvalidConfigurationDetected += (sender, args) => { OnInvalidConfigurationDetected(args); };
+            subscriptionDataReader.NumericalPrecisionLimited += (sender, args) => { OnNumericalPrecisionLimited(args); };
+            subscriptionDataReader.StartDateLimited += (sender, args) => { OnStartDateLimited(args); };
+            subscriptionDataReader.DownloadFailed += (sender, args) => { OnDownloadFailed(args); };
+            subscriptionDataReader.ReaderErrorDetected += (sender, args) => { OnReaderErrorDetected(args); };
+
+            return subscriptionDataReader;
         }
 
         /// <summary>
