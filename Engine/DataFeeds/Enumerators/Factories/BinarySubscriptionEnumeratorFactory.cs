@@ -110,24 +110,29 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                     $"Auroboros binary historical data supports {nameof(TradeBar)} and {nameof(QuoteBar)} only. Received '{dataType}'.");
             }
 
-            var files = BinaryFileResolver.ResolveFilesFor(symbol.Value, requestedPeriod, startUtc, endUtc, _dataPath);
-            if (files.Count == 0)
+            var plan = BinaryFileResolver.ResolveRequest(
+                symbol.Value,
+                dataType,
+                requestedPeriod,
+                startUtc,
+                endUtc,
+                _dataPath);
+            if (plan.Files.Count == 0)
             {
                 return Enumerable.Empty<BaseData>().GetEnumerator();
             }
 
-            var nativePeriod = files[0].Period;
-            if (files.Any(file => file.Period != nativePeriod))
-            {
-                throw new InvalidOperationException("The binary resolver returned heterogeneous native periods for one stream.");
-            }
+            var nativePeriod = plan.NativePeriod.Value;
 
             IEnumerator<BaseData> enumerator = dataType == typeof(TradeBar)
-                ? new BinaryTradeBarSubscriptionReader(symbol, files, startUtc, endUtc)
-                : new BinaryQuoteBarSubscriptionReader(symbol, files, startUtc, endUtc);
+                ? new BinaryTradeBarSubscriptionReader(symbol, plan.Files, startUtc, endUtc)
+                : new BinaryQuoteBarSubscriptionReader(symbol, plan.Files, startUtc, endUtc);
 
-            // LEAN data readers emit exchange-local Time/EndTime. Binary timestamps are UTC.
+            // Native TradeBar/QuoteBar readers convert the bar start into exchange time and
+            // retain Period; EndTime remains Time + Period. Do the same instead of converting
+            // the UTC end instant separately, which would distort Period at DST boundaries.
             enumerator = new BinaryDataTimeZoneEnumerator(enumerator, exchangeTimeZone);
+
             if (requestedPeriod > nativePeriod)
             {
                 enumerator = new BinaryDataConsolidatingEnumerator(enumerator, requestedPeriod);
@@ -163,9 +168,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 if (Current != null)
                 {
                     var utcTime = Current.Time;
-                    var utcEndTime = Current.EndTime;
                     Current.Time = utcTime.ConvertFromUtc(_exchangeTimeZone);
-                    Current.EndTime = utcEndTime.ConvertFromUtc(_exchangeTimeZone);
                 }
                 return true;
             }
@@ -269,15 +272,16 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 }
                 else if (data is QuoteBar quoteBar)
                 {
-                    _working = new QuoteBar
+                    _working = new QuoteBar(
+                        quoteBar.Time,
+                        quoteBar.Symbol,
+                        quoteBar.Bid,
+                        quoteBar.LastBidSize,
+                        quoteBar.Ask,
+                        quoteBar.LastAskSize,
+                        _bucketEnd - quoteBar.Time)
                     {
-                        Time = quoteBar.Time,
-                        EndTime = _bucketEnd,
-                        Period = _bucketEnd - quoteBar.Time,
-                        Symbol = quoteBar.Symbol,
-                        Value = quoteBar.Value,
-                        Bid = CopyBar(quoteBar.Bid),
-                        Ask = CopyBar(quoteBar.Ask)
+                        EndTime = _bucketEnd
                     };
                 }
                 else
@@ -301,7 +305,9 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 {
                     aggregateQuote.Bid = AggregateBar(aggregateQuote.Bid, quoteBar.Bid);
                     aggregateQuote.Ask = AggregateBar(aggregateQuote.Ask, quoteBar.Ask);
-                    aggregateQuote.Value = quoteBar.Value;
+                    aggregateQuote.LastBidSize = quoteBar.LastBidSize;
+                    aggregateQuote.LastAskSize = quoteBar.LastAskSize;
+                    aggregateQuote.Value = aggregateQuote.Close;
                     return;
                 }
 
@@ -318,6 +324,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 else if (_working is QuoteBar quoteBar)
                 {
                     quoteBar.Period = _bucketEnd - quoteBar.Time;
+                    quoteBar.Value = quoteBar.Close;
                 }
                 return _working;
             }

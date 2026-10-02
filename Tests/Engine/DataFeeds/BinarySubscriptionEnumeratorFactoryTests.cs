@@ -56,197 +56,337 @@ namespace QuantConnect.Tests.Engine.DataFeeds
         }
 
         [Test]
-        public void StreamsTradeBarsAcrossFilesWithExactBoundariesEmptyFileAndDedupe()
+        public void TradeBarRowProjectsDirectlyToTradeBar()
         {
-            CreateTradeFile(1,
-                Trade(Minute(0), 10, 12, 9, 11, 1),
-                Trade(Minute(5), 11, 14, 10, 13, 2));
-            CreateEmptyFile(2, "5M");
-            CreateTradeFile(3,
-                Trade(Minute(5), 101, 102, 100, 101, 100),
-                Trade(Minute(10), 13, 15, 8, 9, 3),
-                Trade(Minute(15), 9, 10, 7, 8, 4));
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 7));
 
-            var bars = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(5), Minute(15));
+            var bars = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5));
 
-            Assert.AreEqual(2, bars.Count);
-            Assert.AreEqual(new[] { Minute(5), Minute(10) }, bars.Select(bar => AsUtc(bar.Time)));
-            Assert.AreEqual(11m, bars[0].Open);
-            Assert.AreEqual(13m, bars[0].Close);
-            Assert.AreEqual(13m, bars[1].Open);
-            Assert.AreEqual(9m, bars[1].Close);
-            Assert.AreEqual(TimeSpan.FromMinutes(5), bars[0].Period);
+            Assert.AreEqual(1, bars.Count);
+            Assert.AreEqual(10m, bars[0].Open);
+            Assert.AreEqual(12m, bars[0].High);
+            Assert.AreEqual(9m, bars[0].Low);
+            Assert.AreEqual(11m, bars[0].Close);
+            Assert.AreEqual(7m, bars[0].Volume);
             Assert.AreSame(_symbol, bars[0].Symbol);
         }
 
         [Test]
-        public void StreamsQuoteBarsUsingVerifiedRecordContract()
+        public void QuoteBarRowProjectsToTradeBarAndNativeQuoteBarSemantics()
         {
-            CreateEmptyFile(1, "5M");
-            CreateQuoteFile(2,
-                Quote(Minute(0), 100, 104, 99, 103, 7, 99, 103, 98, 102, 101, 105, 100, 104, 2),
-                Quote(Minute(5), 103, 106, 101, 105, 8, 102, 105, 100, 104, 104, 107, 102, 106, 2));
-            CreateQuoteFile(3,
-                Quote(Minute(5), 999, 999, 999, 999, 999, 999, 999, 999, 999, 999, 999, 999, 999, 0),
-                Quote(Minute(10), 105, 108, 104, 107, 9, 104, 107, 103, 106, 106, 109, 105, 108, 2));
+            CreateQuoteFile(1, "5M", "20240101", "20240102",
+                Quote(Minute(0), 700, 800, 600, 777, 9,
+                    100, 104, 99, 103, 102, 106, 101, 105, 0xDEADBEEF));
 
-            var bars = Read<QuoteBar>(typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(15));
+            var trade = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5)).Single();
+            Assert.AreEqual(700m, trade.Open);
+            Assert.AreEqual(777m, trade.Close);
+            Assert.AreEqual(9m, trade.Volume);
 
-            Assert.AreEqual(3, bars.Count);
-            Assert.AreEqual(105m, bars[1].Value, "QuoteBar.Value must use the producer's absolute close field.");
-            Assert.AreEqual(102m, bars[1].Bid.Open);
-            Assert.AreEqual(105m, bars[1].Bid.High);
-            Assert.AreEqual(100m, bars[1].Bid.Low);
-            Assert.AreEqual(104m, bars[1].Bid.Close);
-            Assert.AreEqual(104m, bars[1].Ask.Open);
-            Assert.AreEqual(107m, bars[1].Ask.High);
-            Assert.AreEqual(102m, bars[1].Ask.Low);
-            Assert.AreEqual(106m, bars[1].Ask.Close);
-            Assert.AreSame(_symbol, bars[1].Symbol);
+            var quote = Read<QuoteBar>(typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5)).Single();
+            Assert.AreEqual(104m, quote.Value);
+            Assert.AreEqual(quote.Close, quote.Value);
+            Assert.AreNotEqual(777m, quote.Value, "Global QuoteBarRow.Close must not overwrite QuoteBar.Value.");
+            Assert.AreEqual(103m, quote.Bid.Close);
+            Assert.AreEqual(105m, quote.Ask.Close);
+            Assert.AreSame(_symbol, quote.Symbol);
         }
 
         [Test]
-        public void ConvertsUtcTimestampsToNonUtcExchangeTimeBeforeEmission()
+        public void TradeBarRowCannotSatisfyQuoteBarRequest()
         {
-            var utc = new DateTime(2024, 7, 1, 12, 0, 0, DateTimeKind.Utc);
-            CreateTradeFile(1, Trade(utc, 10, 12, 9, 11, 1), "20240701", "20240702");
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 7));
+
+            var exception = Assert.Throws<NotSupportedException>(() =>
+                _factory.CreateEnumerator(
+                    _symbol, typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5), TimeZones.Utc));
+            StringAssert.Contains("TradeBarRow cannot project to QuoteBar", exception.Message);
+        }
+
+        [Test]
+        public void MixedNonEmptyPhysicalSetCannotSatisfyQuoteButEmptyDeclarationsAreIgnored()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 7));
+            CreateQuoteFile(2, "5M", "20240101", "20240102",
+                Quote(Minute(0), 10, 12, 9, 11, 1, 99, 103, 98, 102, 101, 105, 100, 104, 0));
+
+            var mixed = Assert.Throws<NotSupportedException>(() =>
+                _factory.CreateEnumerator(
+                    _symbol, typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5), TimeZones.Utc));
+            StringAssert.Contains("TradeBarRow cannot project to QuoteBar", mixed.Message);
+
+            DeleteBinaryFiles();
+            using (File.Create(CreatePath(1, "5M", "20240101", "20240102", "TB")))
+            {
+            }
+            CreateQuoteFile(2, "5M", "20240101", "20240102",
+                Quote(Minute(0), 10, 12, 9, 11, 1, 99, 103, 98, 102, 101, 105, 100, 104, 0));
+
+            Assert.AreEqual(1,
+                Read<QuoteBar>(typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5)).Count);
+        }
+
+        [Test]
+        public void MixedPhysicalSchemasProduceOneChronologicalTradeBarStream()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1),
+                Trade(Minute(10), 12, 14, 11, 13, 3));
+            CreateQuoteFile(2, "5M", "20240101", "20240102",
+                Quote(Minute(5), 11, 13, 10, 12, 2, 100, 101, 99, 100, 101, 102, 100, 101, 1),
+                Quote(Minute(10), 12, 14, 11, 13, 3, 200, 201, 199, 200, 201, 202, 200, 201, 2));
+
+            var bars = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(15));
+
+            CollectionAssert.AreEqual(new[] { Minute(0), Minute(5), Minute(10) }, bars.Select(bar => AsUtc(bar.Time)));
+            CollectionAssert.AreEqual(new[] { 11m, 12m, 13m }, bars.Select(bar => bar.Close));
+        }
+
+        [Test]
+        public void ExactPeriodWinsAndLargestSmallerDivisorIsSelected()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Enumerable.Range(0, 6).Select(index =>
+                    Trade(Minute(index * 5), 10 + index, 20 + index, 5, 11 + index, 1)).ToArray());
+            CreateTradeFile(2, "15M", "20240101", "20240102",
+                Trade(Minute(0), 200, 220, 190, 210, 3),
+                Trade(Minute(15), 210, 230, 205, 225, 3));
+            CreateTradeFile(3, "1H", "20240101", "20240102",
+                Trade(Minute(0), 500, 550, 490, 540, 12));
+
+            var thirtyMinute = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(30), Minute(0), Minute(30)).Single();
+            Assert.AreEqual(200m, thirtyMinute.Open, "The 15-minute source should be selected over the 5-minute source.");
+            Assert.AreEqual(225m, thirtyMinute.Close);
+
+            var hour = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromHours(1), Minute(0), Minute(60)).Single();
+            Assert.AreEqual(500m, hour.Open, "The exact one-hour source should win.");
+            Assert.AreEqual(540m, hour.Close);
+        }
+
+        [Test]
+        public void FinerAndNonDivisibleRequestsFailExplicitly()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1));
+
+            var finer = Assert.Throws<InvalidOperationException>(() =>
+                _factory.CreateEnumerator(
+                    _symbol, typeof(TradeBar), TimeSpan.FromMinutes(1), Minute(0), Minute(10), TimeZones.Utc));
+            StringAssert.Contains("finer", finer.Message);
+            StringAssert.Contains(SymbolValue, finer.Message);
+
+            var nonDivisible = Assert.Throws<InvalidOperationException>(() =>
+                _factory.CreateEnumerator(
+                    _symbol, typeof(TradeBar), TimeSpan.FromMinutes(7), Minute(0), Minute(10), TimeZones.Utc));
+            StringAssert.Contains("exactly divides", nonDivisible.Message);
+        }
+
+        [Test]
+        public void CompatibleNativeTimeframesAggregateEquivalently()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1),
+                Trade(Minute(5), 11, 14, 10, 13, 2),
+                Trade(Minute(10), 13, 15, 8, 9, 3),
+                Trade(Minute(15), 9, 16, 7, 14, 4),
+                Trade(Minute(20), 14, 17, 13, 16, 5),
+                Trade(Minute(25), 16, 18, 12, 15, 6));
+            var fromFive = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(30), Minute(0), Minute(30)).Single();
+
+            DeleteBinaryFiles();
+            CreateTradeFile(1, "15M", "20240101", "20240102",
+                Trade(Minute(0), 10, 15, 8, 9, 6),
+                Trade(Minute(15), 9, 18, 7, 15, 15));
+            var fromFifteen = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(30), Minute(0), Minute(30)).Single();
+
+            DeleteBinaryFiles();
+            CreateTradeFile(1, "30M", "20240101", "20240102",
+                Trade(Minute(0), 10, 18, 7, 15, 21));
+            var native = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(30), Minute(0), Minute(30)).Single();
+
+            AssertTradeBarEqual(native, fromFive);
+            AssertTradeBarEqual(native, fromFifteen);
+        }
+
+        [Test]
+        public void ComplementaryThreeFileOverlapIsMergedWithoutLoss()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 10, 10, 10, 1),
+                Trade(Minute(15), 13, 13, 13, 13, 1));
+            CreateTradeFile(2, "5M", "20240101", "20240102",
+                Trade(Minute(5), 11, 11, 11, 11, 1),
+                Trade(Minute(15), 13, 13, 13, 13, 1));
+            CreateTradeFile(3, "5M", "20240101", "20240102",
+                Trade(Minute(10), 12, 12, 12, 12, 1));
+
+            var bars = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(20));
+
+            CollectionAssert.AreEqual(
+                new[] { Minute(0), Minute(5), Minute(10), Minute(15) },
+                bars.Select(bar => AsUtc(bar.Time)));
+        }
+
+        [Test]
+        public void QuoteDuplicatesIgnoreUnusedGlobalFieldsAndReserved()
+        {
+            CreateQuoteFile(1, "5M", "20240101", "20240102",
+                Quote(Minute(0), 10, 12, 9, 11, 1, 99, 103, 98, 102, 101, 105, 100, 104, 1));
+            CreateQuoteFile(2, "5M", "20240101", "20240102",
+                Quote(Minute(0), 1000, 1200, 900, 1100, 999, 99, 103, 98, 102, 101, 105, 100, 104, 999));
+
+            var bars = Read<QuoteBar>(typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5));
+
+            Assert.AreEqual(1, bars.Count);
+            Assert.AreEqual(103m, bars[0].Value);
+        }
+
+        [Test]
+        public void ConflictingDuplicatesFailWithoutFilenamePricePrecedence()
+        {
+            var first = CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1));
+            var second = CreateTradeFile(2, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 99, 1));
 
             using var enumerator = _factory.CreateEnumerator(
-                _symbol,
+                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5), TimeZones.Utc);
+            var exception = Assert.Throws<InvalidDataException>(() => enumerator.MoveNext());
+            StringAssert.Contains("Conflicting logical binary duplicates", exception.Message);
+            StringAssert.Contains(first, exception.Message);
+            StringAssert.Contains(second, exception.Message);
+
+            AssertFilesCanMove(first, second);
+        }
+
+        [Test]
+        public void EqualAndConflictingSameFileDuplicatesUseLogicalPolicy()
+        {
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1),
+                Trade(Minute(0), 10, 12, 9, 11, 1),
+                Trade(Minute(5), 11, 13, 10, 12, 1));
+            Assert.AreEqual(2,
+                Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(10)).Count);
+
+            DeleteBinaryFiles();
+            CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1),
+                Trade(Minute(0), 10, 12, 9, 12, 1));
+            using var enumerator = _factory.CreateEnumerator(
+                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(10), TimeZones.Utc);
+            Assert.IsTrue(enumerator.MoveNext());
+            Assert.Throws<InvalidDataException>(() => enumerator.MoveNext());
+        }
+
+        [Test]
+        public void EmptyFilesAndSequentialGroupsDoNotTerminateTheStream()
+        {
+            CreateEmptyFile(1, "5M", "20240101", "20240102");
+            CreateTradeFile(2, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1));
+            CreateEmptyFile(3, "5M", "20240102", "20240103");
+            CreateTradeFile(4, "5M", "20240102", "20240103",
+                Trade(Utc(2024, 1, 2), 11, 13, 10, 12, 1));
+
+            var bars = Read<TradeBar>(
                 typeof(TradeBar),
                 TimeSpan.FromMinutes(5),
-                utc,
-                utc.AddMinutes(10),
-                TimeZones.NewYork);
+                Utc(2024, 1, 1),
+                Utc(2024, 1, 2).AddMinutes(5));
 
-            Assert.IsTrue(enumerator.MoveNext());
-            Assert.AreEqual(new DateTime(2024, 7, 1, 8, 0, 0), enumerator.Current.Time);
-            Assert.AreEqual(new DateTime(2024, 7, 1, 8, 5, 0), enumerator.Current.EndTime);
+            CollectionAssert.AreEqual(
+                new[] { Utc(2024, 1, 1), Utc(2024, 1, 2) },
+                bars.Select(bar => AsUtc(bar.Time)));
         }
 
         [Test]
-        public void ConsolidatesTradeBarsAcrossPhysicalFileBoundaryWithPartialFinalBucket()
+        public void DecreasingAndNonFiniteRecordsReportExactBinaryContext()
         {
-            CreateTradeFile(1,
-                Trade(Minute(0), 10, 12, 9, 11, 1),
-                Trade(Minute(5), 11, 14, 10, 13, 2));
-            CreateTradeFile(2,
-                Trade(Minute(5), 100, 100, 100, 100, 100),
-                Trade(Minute(10), 13, 15, 8, 9, 3),
-                Trade(Minute(15), 9, 10, 7, 8, 4));
-
-            var bars = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(15), Minute(0), Minute(20));
-
-            Assert.AreEqual(2, bars.Count);
-            Assert.AreEqual(Minute(0), AsUtc(bars[0].Time));
-            Assert.AreEqual(Minute(15), AsUtc(bars[0].EndTime));
-            Assert.AreEqual(10m, bars[0].Open);
-            Assert.AreEqual(15m, bars[0].High);
-            Assert.AreEqual(8m, bars[0].Low);
-            Assert.AreEqual(9m, bars[0].Close);
-            Assert.AreEqual(6m, bars[0].Volume);
-            Assert.AreEqual(TimeSpan.FromMinutes(15), bars[0].Period);
-
-            Assert.AreEqual(Minute(15), AsUtc(bars[1].Time));
-            Assert.AreEqual(Minute(30), AsUtc(bars[1].EndTime));
-            Assert.AreEqual(4m, bars[1].Volume);
-            Assert.AreEqual(TimeSpan.FromMinutes(15), bars[1].Period);
-        }
-
-        [Test]
-        public void ConsolidatesQuoteBarsAcrossPhysicalFileBoundary()
-        {
-            CreateQuoteFile(1,
-                Quote(Minute(0), 100, 104, 99, 103, 1, 99, 103, 98, 102, 101, 105, 100, 104, 2),
-                Quote(Minute(5), 103, 106, 101, 105, 1, 102, 105, 100, 104, 104, 107, 102, 106, 2));
-            CreateQuoteFile(2,
-                Quote(Minute(5), 999, 999, 999, 999, 1, 999, 999, 999, 999, 999, 999, 999, 999, 0),
-                Quote(Minute(10), 105, 108, 97, 107, 1, 104, 107, 96, 106, 106, 109, 98, 108, 2));
-
-            var bars = Read<QuoteBar>(typeof(QuoteBar), TimeSpan.FromMinutes(15), Minute(0), Minute(15));
-
-            Assert.AreEqual(1, bars.Count);
-            Assert.AreEqual(107m, bars[0].Value);
-            Assert.AreEqual(99m, bars[0].Bid.Open);
-            Assert.AreEqual(107m, bars[0].Bid.High);
-            Assert.AreEqual(96m, bars[0].Bid.Low);
-            Assert.AreEqual(106m, bars[0].Bid.Close);
-            Assert.AreEqual(101m, bars[0].Ask.Open);
-            Assert.AreEqual(109m, bars[0].Ask.High);
-            Assert.AreEqual(98m, bars[0].Ask.Low);
-            Assert.AreEqual(108m, bars[0].Ask.Close);
-        }
-
-        [Test]
-        public void PreservesCoarserNativePeriodWhenRequestIsFiner()
-        {
-            CreateTradeFile(1, Trade(Minute(0), 10, 12, 9, 11, 1));
-
-            var bars = Read<TradeBar>(typeof(TradeBar), TimeSpan.FromMinutes(1), Minute(0), Minute(10));
-
-            Assert.AreEqual(1, bars.Count);
-            Assert.AreEqual(TimeSpan.FromMinutes(5), bars[0].Period);
-        }
-
-        [Test]
-        public void RejectsMalformedRecordLengthAndNonChronologicalRecords()
-        {
-            var malformed = CreateEmptyFile(1, "5M");
-            File.WriteAllBytes(malformed, new byte[] { 1 });
-            using (var enumerator = _factory.CreateEnumerator(
-                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(20), TimeZones.Utc))
-            {
-                Assert.Throws<InvalidDataException>(() => enumerator.MoveNext());
-            }
-
-            File.Delete(malformed);
-            CreateTradeFile(2,
+            var decreasing = CreateTradeFile(1, "5M", "20240101", "20240102",
                 Trade(Minute(5), 10, 12, 9, 11, 1),
                 Trade(Minute(0), 11, 13, 10, 12, 2));
-            using var unordered = _factory.CreateEnumerator(
-                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(20), TimeZones.Utc);
-            Assert.IsTrue(unordered.MoveNext());
-            Assert.Throws<InvalidDataException>(() => unordered.MoveNext());
-        }
-
-        [Test]
-        public void QuoteReaderRejectsMalformedRecordLengthAndNonChronologicalRecords()
-        {
-            var malformed = CreateEmptyFile(1, "5M");
-            File.WriteAllBytes(malformed, new byte[] { 1 });
             using (var enumerator = _factory.CreateEnumerator(
-                _symbol, typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(20), TimeZones.Utc))
+                       _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(10), TimeZones.Utc))
             {
-                Assert.Throws<InvalidDataException>(() => enumerator.MoveNext());
+                Assert.IsTrue(enumerator.MoveNext());
+                var exception = Assert.Throws<InvalidDataException>(() => enumerator.MoveNext());
+                StringAssert.Contains(decreasing, exception.Message);
+                StringAssert.Contains("recordIndex=1", exception.Message);
+                StringAssert.Contains("byteOffset=32", exception.Message);
+                StringAssert.Contains("TradeBarRow", exception.Message);
             }
 
-            File.Delete(malformed);
-            CreateQuoteFile(2,
-                Quote(Minute(5), 100, 104, 99, 103, 1, 99, 103, 98, 102, 101, 105, 100, 104, 2),
-                Quote(Minute(0), 103, 106, 101, 105, 1, 102, 105, 100, 104, 104, 107, 102, 106, 2));
-            using var unordered = _factory.CreateEnumerator(
-                _symbol, typeof(QuoteBar), TimeSpan.FromMinutes(5), Minute(0), Minute(20), TimeZones.Utc);
-            Assert.IsTrue(unordered.MoveNext());
-            Assert.Throws<InvalidDataException>(() => unordered.MoveNext());
+            DeleteBinaryFiles();
+            var nonFinite = CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), float.NaN, 12, 9, 11, 1));
+            using var invalid = _factory.CreateEnumerator(
+                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5), TimeZones.Utc);
+            var invalidException = Assert.Throws<InvalidDataException>(() => invalid.MoveNext());
+            StringAssert.Contains(nonFinite, invalidException.Message);
+            StringAssert.Contains("Open is not finite", invalidException.Message);
+            StringAssert.Contains("byteOffset=0", invalidException.Message);
         }
 
         [Test]
-        public void EarlyDisposeReleasesMappedFile()
+        public void EarlyDisposeReleasesSequentialAndOverlapMappings()
         {
-            var path = CreateTradeFile(1, Trade(Minute(0), 10, 12, 9, 11, 1));
+            var sequential = CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1));
             var enumerator = _factory.CreateEnumerator(
-                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(10), TimeZones.Utc);
-
+                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5), TimeZones.Utc);
             Assert.IsTrue(enumerator.MoveNext());
             enumerator.Dispose();
+            AssertFilesCanMove(sequential);
 
-            var movedPath = path + ".moved";
-            File.Move(path, movedPath);
-            Assert.IsTrue(File.Exists(movedPath));
+            DeleteBinaryFiles();
+            var overlapA = CreateTradeFile(1, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1));
+            var overlapB = CreateTradeFile(2, "5M", "20240101", "20240102",
+                Trade(Minute(0), 10, 12, 9, 11, 1));
+            var overlap = _factory.CreateEnumerator(
+                _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(5), TimeZones.Utc);
+            Assert.IsTrue(overlap.MoveNext());
+            overlap.Dispose();
+            AssertFilesCanMove(overlapA, overlapB);
         }
 
         [Test]
-        public void ReturnsEmptyForNoMatchingFilesAndRejectsUnsupportedRequests()
+        public void UtcChronologySurvivesBothNewYorkDstTransitions()
+        {
+            var forwardFirst = new DateTime(2024, 3, 10, 6, 55, 0, DateTimeKind.Utc);
+            var forwardSecond = forwardFirst.AddMinutes(5);
+            CreateTradeFile(1, "5M", "20240310", "20240311",
+                Trade(forwardFirst, 10, 10, 10, 10, 1),
+                Trade(forwardSecond, 11, 11, 11, 11, 1));
+
+            var forward = Read<TradeBar>(
+                typeof(TradeBar), TimeSpan.FromMinutes(5), forwardFirst, forwardSecond.AddMinutes(5), TimeZones.NewYork);
+            CollectionAssert.AreEqual(
+                new[] { new DateTime(2024, 3, 10, 1, 55, 0), new DateTime(2024, 3, 10, 3, 0, 0) },
+                forward.Select(bar => bar.Time));
+
+            DeleteBinaryFiles();
+            var backwardFirst = new DateTime(2024, 11, 3, 5, 55, 0, DateTimeKind.Utc);
+            var backwardSecond = backwardFirst.AddMinutes(5);
+            CreateTradeFile(1, "5M", "20241103", "20241104",
+                Trade(backwardFirst, 10, 10, 10, 10, 1),
+                Trade(backwardSecond, 11, 11, 11, 11, 1));
+
+            var backward = Read<TradeBar>(
+                typeof(TradeBar), TimeSpan.FromMinutes(5), backwardFirst, backwardSecond.AddMinutes(5), TimeZones.NewYork);
+            Assert.AreEqual(2, backward.Count);
+            Assert.AreEqual(new DateTime(2024, 11, 3, 1, 55, 0), backward[0].Time);
+            Assert.AreEqual(new DateTime(2024, 11, 3, 1, 0, 0), backward[1].Time);
+            CollectionAssert.AreEqual(new[] { 10m, 11m }, backward.Select(bar => bar.Close));
+            Assert.IsTrue(backward.All(bar => bar.Period == TimeSpan.FromMinutes(5)));
+        }
+
+        [Test]
+        public void ReturnsEmptyForNoFilesAndRejectsUnsupportedRequests()
         {
             using var empty = _factory.CreateEnumerator(
                 _symbol, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(10), TimeZones.Utc);
@@ -260,11 +400,16 @@ namespace QuantConnect.Tests.Engine.DataFeeds
                 equity, typeof(TradeBar), TimeSpan.FromMinutes(5), Minute(0), Minute(10), TimeZones.Utc));
         }
 
-        private List<T> Read<T>(Type dataType, TimeSpan requestedPeriod, DateTime startUtc, DateTime endUtc)
+        private List<T> Read<T>(
+            Type dataType,
+            TimeSpan requestedPeriod,
+            DateTime startUtc,
+            DateTime endUtc,
+            NodaTime.DateTimeZone timeZone = null)
             where T : BaseData
         {
             using var enumerator = _factory.CreateEnumerator(
-                _symbol, dataType, requestedPeriod, startUtc, endUtc, TimeZones.Utc);
+                _symbol, dataType, requestedPeriod, startUtc, endUtc, timeZone ?? TimeZones.Utc);
             var data = new List<T>();
             while (enumerator.MoveNext())
             {
@@ -273,19 +418,14 @@ namespace QuantConnect.Tests.Engine.DataFeeds
             return data;
         }
 
-        private string CreateTradeFile(int index, params TradeRecord[] records)
+        private string CreateTradeFile(
+            int index,
+            string period,
+            string from,
+            string to,
+            params TradeRecord[] records)
         {
-            return CreateTradeFile(index, records, "20240101", "20240102");
-        }
-
-        private string CreateTradeFile(int index, TradeRecord record, string from, string to)
-        {
-            return CreateTradeFile(index, new[] { record }, from, to);
-        }
-
-        private string CreateTradeFile(int index, TradeRecord[] records, string from, string to)
-        {
-            var path = CreatePath(index, "5M", from, to);
+            var path = CreatePath(index, period, from, to, "TB");
             using var writer = new BinaryWriter(File.Create(path));
             foreach (var record in records)
             {
@@ -295,15 +435,20 @@ namespace QuantConnect.Tests.Engine.DataFeeds
                 writer.Write(record.Low);
                 writer.Write(record.Close);
                 writer.Write(record.Volume);
-                writer.Write(0); // native C trailing alignment padding
+                writer.Write(0); // native C alignment padding; no semantic field
             }
             Assert.AreEqual(0, writer.BaseStream.Position % BinaryTradeBarSubscriptionReader.RecordSize);
             return path;
         }
 
-        private string CreateQuoteFile(int index, params QuoteRecord[] records)
+        private string CreateQuoteFile(
+            int index,
+            string period,
+            string from,
+            string to,
+            params QuoteRecord[] records)
         {
-            var path = CreatePath(index, "5M", "20240101", "20240102");
+            var path = CreatePath(index, period, from, to, "QB");
             using var writer = new BinaryWriter(File.Create(path));
             foreach (var record in records)
             {
@@ -321,26 +466,57 @@ namespace QuantConnect.Tests.Engine.DataFeeds
                 writer.Write(record.AskHigh);
                 writer.Write(record.AskLow);
                 writer.Write(record.AskClose);
-                writer.Write(record.Spread);
+                writer.Write(record.Reserved);
             }
             Assert.AreEqual(0, writer.BaseStream.Position % BinaryQuoteBarSubscriptionReader.RecordSize);
             return path;
         }
 
-        private string CreateEmptyFile(int index, string period)
+        private string CreateEmptyFile(int index, string period, string from, string to)
         {
-            var path = CreatePath(index, period, "20240101", "20240102");
+            var path = CreatePath(index, period, from, to, null);
             using (File.Create(path))
             {
             }
             return path;
         }
 
-        private string CreatePath(int index, string period, string from, string to)
+        private string CreatePath(int index, string period, string from, string to, string suffix)
         {
             var directory = Path.Combine(_dataPath, $"FX_{SymbolValue}_test_bin_data");
             Directory.CreateDirectory(directory);
-            return Path.Combine(directory, $"{index}-FX_{SymbolValue}_{period}_{from}-{to}.bin");
+            var tag = suffix == null ? string.Empty : "_" + suffix;
+            return Path.Combine(directory, $"{index}-FX_{SymbolValue}_{period}_{from}-{to}{tag}.bin");
+        }
+
+        private void DeleteBinaryFiles()
+        {
+            foreach (var file in Directory.EnumerateFiles(_dataPath, "*.bin", SearchOption.AllDirectories))
+            {
+                File.Delete(file);
+            }
+        }
+
+        private static void AssertFilesCanMove(params string[] paths)
+        {
+            foreach (var path in paths)
+            {
+                var moved = path + "." + Guid.NewGuid().ToString("N") + ".moved";
+                File.Move(path, moved);
+                Assert.IsTrue(File.Exists(moved));
+            }
+        }
+
+        private static void AssertTradeBarEqual(TradeBar expected, TradeBar actual)
+        {
+            Assert.AreEqual(expected.Time, actual.Time);
+            Assert.AreEqual(expected.EndTime, actual.EndTime);
+            Assert.AreEqual(expected.Period, actual.Period);
+            Assert.AreEqual(expected.Open, actual.Open);
+            Assert.AreEqual(expected.High, actual.High);
+            Assert.AreEqual(expected.Low, actual.Low);
+            Assert.AreEqual(expected.Close, actual.Close);
+            Assert.AreEqual(expected.Volume, actual.Volume);
         }
 
         private static TradeRecord Trade(DateTime time, float open, float high, float low, float close, float volume)
@@ -363,15 +539,20 @@ namespace QuantConnect.Tests.Engine.DataFeeds
             float askHigh,
             float askLow,
             float askClose,
-            float spread)
+            uint reserved)
         {
             return new QuoteRecord(time, open, high, low, close, volume,
-                bidOpen, bidHigh, bidLow, bidClose, askOpen, askHigh, askLow, askClose, spread);
+                bidOpen, bidHigh, bidLow, bidClose, askOpen, askHigh, askLow, askClose, reserved);
         }
 
         private static DateTime Minute(int minute)
         {
-            return new DateTime(2024, 1, 1, 0, minute, 0, DateTimeKind.Utc);
+            return Utc(2024, 1, 1).AddMinutes(minute);
+        }
+
+        private static DateTime Utc(int year, int month, int day)
+        {
+            return new DateTime(year, month, day, 0, 0, 0, DateTimeKind.Utc);
         }
 
         private static DateTime AsUtc(DateTime time)
@@ -396,6 +577,6 @@ namespace QuantConnect.Tests.Engine.DataFeeds
             float AskHigh,
             float AskLow,
             float AskClose,
-            float Spread);
+            uint Reserved);
     }
 }

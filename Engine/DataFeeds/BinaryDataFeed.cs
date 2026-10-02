@@ -28,11 +28,6 @@ using QuantConnect.Lean.Engine.Results;
 using QuantConnect.Packets;
 using QuantConnect.Util;
 
-/**
- * 📦 BinaryDataFeed.cs
- * DataFeed que lee .bin (BinaryDataLoader) respetando "bar-type" y "timeframe" del config.json.
- * Mantiene la tubería LEAN: warmup, fill-forward, filtros y schedules de universos.
- */
 namespace QuantConnect.Lean.Engine.DataFeeds
 {
     /// <summary>
@@ -89,6 +84,16 @@ namespace QuantConnect.Lean.Engine.DataFeeds
         /// </summary>
         protected override IEnumerator<BaseData> CreateUnderlyingDataEnumerator(SubscriptionRequest request)
         {
+            // Auxiliary, universe, unsupported-type, and non-Forex subscriptions remain owned
+            // by the native file-system feed. Supported Forex market-bar subscriptions (including
+            // internal consumers such as a Forex benchmark) share the binary source semantics.
+            if (request.Configuration.SecurityType != SecurityType.Forex
+                || (request.Configuration.Type != typeof(QuantConnect.Data.Market.TradeBar)
+                    && request.Configuration.Type != typeof(QuantConnect.Data.Market.QuoteBar)))
+            {
+                return base.CreateUnderlyingDataEnumerator(request);
+            }
+
             IEnumerator<BaseData> enumerator = _binaryFactory.CreateEnumerator(request, null);
 
             if (LeanData.UseDailyStrictEndTimes(
