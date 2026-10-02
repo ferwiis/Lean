@@ -1,29 +1,26 @@
 /*
- * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
- * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
+ * AUROBOROS
+ * High-performance algorithmic trading and research infrastructure.
+ *
+ * Copyright (c) 2026 Juan Fernando Alzate Gomez.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
-*/
+ */
 
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Linq;
-using NodaTime;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Interfaces;
-using QuantConnect.Util;
 
 namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
 {
@@ -107,24 +104,29 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                     $"Auroboros binary historical data supports {nameof(TradeBar)} and {nameof(QuoteBar)} only. Received '{dataType}'.");
             }
 
-            var files = BinaryFileResolver.ResolveFilesFor(symbol.Value, requestedPeriod, startUtc, endUtc, _dataPath);
-            if (files.Count == 0)
+            var plan = BinaryFileResolver.ResolveRequest(
+                symbol.Value,
+                dataType,
+                requestedPeriod,
+                startUtc,
+                endUtc,
+                _dataPath);
+            if (plan.Files.Count == 0)
             {
                 return Enumerable.Empty<BaseData>().GetEnumerator();
             }
 
-            var nativePeriod = files[0].Period;
-            if (files.Any(file => file.Period != nativePeriod))
-            {
-                throw new InvalidOperationException("The binary resolver returned heterogeneous native periods for one stream.");
-            }
+            var nativePeriod = plan.NativePeriod.Value;
 
             IEnumerator<BaseData> enumerator = dataType == typeof(TradeBar)
-                ? new BinaryTradeBarSubscriptionReader(symbol, files, startUtc, endUtc)
-                : new BinaryQuoteBarSubscriptionReader(symbol, files, startUtc, endUtc);
+                ? new BinaryTradeBarSubscriptionReader(symbol, plan.Files, startUtc, endUtc)
+                : new BinaryQuoteBarSubscriptionReader(symbol, plan.Files, startUtc, endUtc);
 
-            // LEAN data readers emit exchange-local Time/EndTime. Binary timestamps are UTC.
+            // Native TradeBar/QuoteBar readers convert the bar start into exchange time and
+            // retain Period; EndTime remains Time + Period. Do the same instead of converting
+            // the UTC end instant separately, which would distort Period at DST boundaries.
             enumerator = new BinaryDataTimeZoneEnumerator(enumerator, exchangeTimeZone);
+
             if (requestedPeriod > nativePeriod)
             {
                 enumerator = new BinaryDataConsolidatingEnumerator(enumerator, requestedPeriod);
@@ -160,9 +162,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 if (Current != null)
                 {
                     var utcTime = Current.Time;
-                    var utcEndTime = Current.EndTime;
                     Current.Time = utcTime.ConvertFromUtc(_exchangeTimeZone);
-                    Current.EndTime = utcEndTime.ConvertFromUtc(_exchangeTimeZone);
                 }
                 return true;
             }
@@ -266,15 +266,16 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 }
                 else if (data is QuoteBar quoteBar)
                 {
-                    _working = new QuoteBar
+                    _working = new QuoteBar(
+                        quoteBar.Time,
+                        quoteBar.Symbol,
+                        quoteBar.Bid,
+                        quoteBar.LastBidSize,
+                        quoteBar.Ask,
+                        quoteBar.LastAskSize,
+                        _bucketEnd - quoteBar.Time)
                     {
-                        Time = quoteBar.Time,
-                        EndTime = _bucketEnd,
-                        Period = _bucketEnd - quoteBar.Time,
-                        Symbol = quoteBar.Symbol,
-                        Value = quoteBar.Value,
-                        Bid = CopyBar(quoteBar.Bid),
-                        Ask = CopyBar(quoteBar.Ask)
+                        EndTime = _bucketEnd
                     };
                 }
                 else
@@ -298,7 +299,9 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 {
                     aggregateQuote.Bid = AggregateBar(aggregateQuote.Bid, quoteBar.Bid);
                     aggregateQuote.Ask = AggregateBar(aggregateQuote.Ask, quoteBar.Ask);
-                    aggregateQuote.Value = quoteBar.Value;
+                    aggregateQuote.LastBidSize = quoteBar.LastBidSize;
+                    aggregateQuote.LastAskSize = quoteBar.LastAskSize;
+                    aggregateQuote.Value = aggregateQuote.Close;
                     return;
                 }
 
@@ -315,6 +318,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds.Enumerators.Factories
                 else if (_working is QuoteBar quoteBar)
                 {
                     quoteBar.Period = _bucketEnd - quoteBar.Time;
+                    quoteBar.Value = quoteBar.Close;
                 }
                 return _working;
             }

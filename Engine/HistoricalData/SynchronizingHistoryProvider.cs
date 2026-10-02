@@ -13,11 +13,6 @@
  * limitations under the License.
 */
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using NodaTime;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Data.UniverseSelection;
@@ -61,62 +56,67 @@ namespace QuantConnect.Lean.Engine.HistoricalData
             // never changes, there's no selection during a history request
             var universeSelectionData = new Dictionary<Universe, BaseDataCollection>();
             var timeSliceFactory = new TimeSliceFactory(sliceTimeZone);
-            while (true)
+            try
             {
-                var earlyBirdTicks = long.MaxValue;
-                var data = new List<DataFeedPacket>();
-                foreach (var subscription in subscriptions.Where(subscription => !subscription.EndOfStream))
+                while (true)
                 {
-                    if (subscription.Current == null && !subscription.MoveNext())
+                    var earlyBirdTicks = long.MaxValue;
+                    var data = new List<DataFeedPacket>();
+                    foreach (var subscription in subscriptions.Where(subscription => !subscription.EndOfStream))
                     {
-                        // initial pump. We do it here and not when creating the subscriptions so
-                        // that parallel workers can all start as fast as possible
-                        continue;
-                    }
-
-                    DataFeedPacket packet = null;
-                    while (subscription.Current.EmitTimeUtc <= frontier)
-                    {
-                        if (packet == null)
+                        if (subscription.Current == null && !subscription.MoveNext())
                         {
-                            // for performance, lets be selfish about creating a new instance
-                            packet = new DataFeedPacket(subscription.Security, subscription.Configuration);
-
-                            // only add if we have data
-                            data.Add(packet);
+                            // initial pump. We do it here and not when creating the subscriptions so
+                            // that parallel workers can all start as fast as possible
+                            continue;
                         }
 
-                        packet.Add(subscription.Current.Data);
-                        Interlocked.Increment(ref _dataPointCount);
-                        if (!subscription.MoveNext())
+                        DataFeedPacket packet = null;
+                        while (subscription.Current.EmitTimeUtc <= frontier)
                         {
-                            break;
+                            if (packet == null)
+                            {
+                                // for performance, lets be selfish about creating a new instance
+                                packet = new DataFeedPacket(subscription.Security, subscription.Configuration);
+
+                                // only add if we have data
+                                data.Add(packet);
+                            }
+
+                            packet.Add(subscription.Current.Data);
+                            Interlocked.Increment(ref _dataPointCount);
+                            if (!subscription.MoveNext())
+                            {
+                                break;
+                            }
+                        }
+                        // update our early bird ticks (next frontier time)
+                        if (subscription.Current != null)
+                        {
+                            // take the earliest between the next piece of data or the next tz discontinuity
+                            earlyBirdTicks = Math.Min(earlyBirdTicks, subscription.Current.EmitTimeUtc.Ticks);
                         }
                     }
-                    // update our early bird ticks (next frontier time)
-                    if (subscription.Current != null)
+
+                    if (data.Count != 0)
                     {
-                        // take the earliest between the next piece of data or the next tz discontinuity
-                        earlyBirdTicks = Math.Min(earlyBirdTicks, subscription.Current.EmitTimeUtc.Ticks);
+                        // reuse the slice construction code from TimeSlice.Create
+                        yield return timeSliceFactory.Create(frontier, data, SecurityChanges.None, universeSelectionData).Slice;
                     }
+
+                    // end of subscriptions, after we emit, else we might drop a data point
+                    if (earlyBirdTicks == long.MaxValue) break;
+
+                    frontier = new DateTime(Math.Max(earlyBirdTicks, frontier.Ticks), DateTimeKind.Utc);
                 }
-
-                if (data.Count != 0)
-                {
-                    // reuse the slice construction code from TimeSlice.Create
-                    yield return timeSliceFactory.Create(frontier, data, SecurityChanges.None, universeSelectionData).Slice;
-                }
-
-                // end of subscriptions, after we emit, else we might drop a data point
-                if (earlyBirdTicks == long.MaxValue) break;
-
-                frontier = new DateTime(Math.Max(earlyBirdTicks, frontier.Ticks), DateTimeKind.Utc);
             }
-
-            // make sure we clean up after ourselves
-            foreach (var subscription in subscriptions)
+            finally
             {
-                subscription.Dispose();
+                // Iterator disposal must release subscriptions even when history enumeration ends early.
+                foreach (var subscription in subscriptions)
+                {
+                    subscription.Dispose();
+                }
             }
         }
 

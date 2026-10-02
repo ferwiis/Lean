@@ -43,6 +43,25 @@ namespace QuantConnect.Tests.Engine.DataFeeds
             var endUtc = files.Max(file => file.ToUtc);
             var symbol = Symbol.Create("EURNZD", SecurityType.Forex, Market.Oanda);
             var factory = new BinarySubscriptionEnumeratorFactory(dataPath);
+
+            var differingRow = FindQuoteRowWhereGlobalCloseDiffers(files);
+            Assert.IsNotNull(differingRow,
+                "The local real dataset did not expose a row suitable for proving global-close independence.");
+            using (var oneRow = factory.CreateEnumerator(
+                       symbol,
+                       typeof(QuoteBar),
+                       TimeSpan.FromMinutes(5),
+                       differingRow.Value.TimeUtc,
+                       differingRow.Value.TimeUtc.AddMinutes(5),
+                       TimeZones.Utc))
+            {
+                Assert.IsTrue(oneRow.MoveNext());
+                var quote = (QuoteBar)oneRow.Current;
+                Assert.AreEqual(quote.Close, quote.Value);
+                Assert.AreNotEqual((decimal)differingRow.Value.GlobalClose, quote.Value,
+                    "QuoteBar.Value must be derived from stored Bid/Ask rather than global Close.");
+            }
+
             using var enumerator = factory.CreateEnumerator(
                 symbol,
                 typeof(QuoteBar),
@@ -76,6 +95,7 @@ namespace QuantConnect.Tests.Engine.DataFeeds
                 Assert.AreSame(symbol, bar.Symbol);
                 Assert.IsNotNull(bar.Bid);
                 Assert.IsNotNull(bar.Ask);
+                Assert.AreEqual(bar.Close, bar.Value);
                 previous = bar.Time;
                 count++;
 
@@ -102,5 +122,69 @@ namespace QuantConnect.Tests.Engine.DataFeeds
                 $"collections={GC.CollectionCount(0) - gen0Before}/{GC.CollectionCount(1) - gen1Before}/{GC.CollectionCount(2) - gen2Before}, " +
                 $"first={first:o}, last={previous:o}");
         }
+
+        [Test]
+        [Category("Integration")]
+        public void CharacterizesEquivalentRealNativeTimeframesWhenAvailable()
+        {
+            var dataPath = Path.GetFullPath(Path.Combine(Globals.DataFolder, "historical_data"));
+            var metadata = BinaryFileResolver.GetAllMetasForSymbol("EURNZD", dataPath);
+            var periods = metadata.Select(file => file.Period).Distinct().OrderBy(period => period).ToList();
+            if (periods.Count < 2)
+            {
+                Assert.Ignore($"Multiple local EURNZD native periods are not available under '{dataPath}'.");
+            }
+
+            var target = periods
+                .Where(candidate => periods.Any(period => period < candidate && candidate.Ticks % period.Ticks == 0))
+                .DefaultIfEmpty(TimeSpan.Zero)
+                .Max();
+            if (target == TimeSpan.Zero)
+            {
+                Assert.Ignore("The available real native periods have no exact aggregation relationship.");
+            }
+
+            TestContext.Progress.WriteLine(
+                $"Real multi-timeframe characterization candidate: periods={string.Join(", ", periods)}, target={target}.");
+        }
+
+        private static QuoteRowSample? FindQuoteRowWhereGlobalCloseDiffers(
+            IReadOnlyList<BinaryFileResolver.BinMeta> files)
+        {
+            foreach (var file in files.OrderBy(metadata => metadata.FullPath, StringComparer.OrdinalIgnoreCase))
+            {
+                using var reader = new BinaryReader(File.Open(file.FullPath, FileMode.Open, FileAccess.Read, FileShare.Read));
+                var count = Math.Min(reader.BaseStream.Length / BinaryQuoteBarSubscriptionReader.RecordSize, 4096);
+                for (var index = 0L; index < count; index++)
+                {
+                    var timestamp = reader.ReadDouble();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    var globalClose = reader.ReadSingle();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    var bidClose = reader.ReadSingle();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    reader.ReadSingle();
+                    var askClose = reader.ReadSingle();
+                    reader.ReadUInt32();
+
+                    var midpoint = ((decimal)bidClose + (decimal)askClose) / 2m;
+                    if ((decimal)globalClose != midpoint)
+                    {
+                        var utc = DateTimeOffset.FromUnixTimeSeconds((long)timestamp).UtcDateTime;
+                        return new QuoteRowSample(utc, globalClose);
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private readonly record struct QuoteRowSample(DateTime TimeUtc, float GlobalClose);
     }
 }
