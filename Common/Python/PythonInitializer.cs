@@ -82,7 +82,8 @@ namespace QuantConnect.Python
 
                 try
                 {
-                    var pyLock = Py.GIL();
+                    // PythonEngine.Shutdown owns its GIL acquisition and release. An outer
+                    // GIL handle cannot be released after the interpreter has shut down.
                     Log.Trace($"PythonInitializer.Shutdown(): calling engine shutdown...");
                     PythonEngine.Shutdown();
                 }

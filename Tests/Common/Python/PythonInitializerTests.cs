@@ -13,6 +13,8 @@
  * limitations under the License.
 */
 
+using System;
+using System.Diagnostics;
 using System.IO;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,12 +22,88 @@ using NUnit.Framework;
 using Python.Runtime;
 
 using QuantConnect.Python;
+using QuantConnect.Util;
 
 namespace QuantConnect.Tests.Common.Python
 {
     [TestFixture]
     public class PythonInitializerTests
     {
+        private const string ChildEnvironmentVariable = "LEAN_PYTHON_LIFECYCLE_TEST_CHILD";
+        private const string CompletionMarker = "PYTHON_LIFECYCLE_SHUTDOWN_COMPLETE";
+
+        [Test]
+        public void ShutdownCompletesWithoutLeakingGil()
+        {
+            if (Environment.GetEnvironmentVariable(ChildEnvironmentVariable) == "shutdown")
+            {
+                using (Py.GIL())
+                {
+                    using var result = PythonEngine.Eval("6 * 7");
+                    Assert.AreEqual(42, result.As<int>());
+                }
+
+                // Exercise the worker-thread shutdown path used by algorithms.
+                var isolator = new Isolator();
+                Assert.IsTrue(isolator.ExecuteWithTimeLimit(TimeSpan.FromSeconds(30), PythonInitializer.Shutdown, 5000));
+                Assert.IsFalse(PythonEngine.IsInitialized);
+                PythonInitializer.Shutdown();
+
+                // Test-only pressure: expose leaked tokens instead of allowing a
+                // successful child exit to hide a pending throwing finalizer.
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                TestContext.Progress.WriteLine(CompletionMarker);
+                return;
+            }
+
+            var child = RunLifecycleChild("shutdown");
+            Assert.AreEqual(0, child.ExitCode, child.Output);
+            StringAssert.Contains(CompletionMarker, child.Output);
+            StringAssert.DoesNotContain("Py.GILState.Finalize", child.Output);
+        }
+
+        [Test]
+        public void InvalidRuntimeFailsBeforeAcquiringGil()
+        {
+            var child = RunLifecycleChild("invalid-runtime");
+            Assert.AreNotEqual(0, child.ExitCode, child.Output);
+            StringAssert.Contains("DllNotFoundException", child.Output);
+            StringAssert.Contains(nameof(AssemblyInitialize.InitializePythonForDiscovery), child.Output);
+            StringAssert.DoesNotContain("Py.GILState.Finalize", child.Output);
+            StringAssert.DoesNotContain(CompletionMarker, child.Output);
+        }
+
+        private static (int ExitCode, string Output) RunLifecycleChild(string mode)
+        {
+            var startInfo = new ProcessStartInfo("dotnet")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("vstest");
+            startInfo.ArgumentList.Add(typeof(PythonInitializerTests).Assembly.Location);
+            startInfo.ArgumentList.Add("/TestCaseFilter:FullyQualifiedName=" + typeof(PythonInitializerTests).FullName + "." + nameof(ShutdownCompletesWithoutLeakingGil));
+            startInfo.ArgumentList.Add("/Logger:console;verbosity=detailed");
+            startInfo.Environment[ChildEnvironmentVariable] = mode;
+            if (mode == "invalid-runtime")
+            {
+                startInfo.Environment["PYTHONNET_PYDLL"] = Path.Combine(Path.GetTempPath(), "lean-missing-python-" + Guid.NewGuid().ToString("N") + ".dll");
+            }
+
+            using var process = Process.Start(startInfo);
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(120000))
+            {
+                process.Kill(entireProcessTree: true);
+                Assert.Fail("Python lifecycle child did not exit within two minutes.");
+            }
+            return (process.ExitCode, output.GetAwaiter().GetResult() + error.GetAwaiter().GetResult());
+        }
+
         [Test]
         public void AlgorithmLocationIsAlwaysBeforeOtherPaths()
         {

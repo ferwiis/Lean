@@ -16,6 +16,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 using NUnit.Framework;
 using NUnit.Framework.Interfaces;
 using ProtoBuf.Meta;
@@ -37,6 +38,17 @@ namespace QuantConnect.Tests
     {
         private static bool _initialized;
 
+        /// <summary>
+        /// Initialize Python before NUnit evaluates Python-backed test case sources.
+        /// A failed startup must prevent discovery from acquiring GIL handles against
+        /// a partially initialized runtime.
+        /// </summary>
+        [ModuleInitializer]
+        internal static void InitializePythonForDiscovery()
+        {
+            AdjustCurrentDirectory();
+        }
+
         [OneTimeSetUp]
         public void InitializeTestEnvironment()
         {
@@ -51,10 +63,8 @@ namespace QuantConnect.Tests
             {
                 return;
             }
-            _initialized = true;
-
             // nunit 3 sets the current folder to a temp folder we need it to be the test bin output folder
-            var dir = TestContext.CurrentContext.TestDirectory;
+            var dir = Path.GetDirectoryName(typeof(AssemblyInitialize).Assembly.Location);
             Environment.CurrentDirectory = dir;
             Directory.SetCurrentDirectory(dir);
             Config.Reset();
@@ -83,6 +93,8 @@ namespace QuantConnect.Tests
                 "../../../Algorithm.Framework/Selection",
                 "../../../Algorithm.Python"
                 });
+
+            _initialized = true;
         }
 
         private static void TryAddIconicDataSubTypes()
